@@ -550,6 +550,18 @@ require('lazy').setup({
           --
           -- When you move your cursor, the highlights will be cleared (the second autocommand).
           local client = vim.lsp.get_client_by_id(event.data.client_id)
+          -- Auto-detect .venv for pyright
+          if client and client.name == 'pyright' then
+            local venv = vim.fn.getcwd() .. '/.venv/bin/python'
+            local python = vim.fn.executable(venv) == 1 and venv or vim.fn.exepath 'python3' or 'python'
+            client.config.settings = vim.tbl_deep_extend('force', client.config.settings or {}, {
+              python = { pythonPath = python },
+            })
+            vim.lsp.buf_notify(event.buf, 'workspace/didChangeConfiguration', {
+              settings = client.config.settings,
+            })
+          end
+
           if client and client:supports_method('textDocument/documentHighlight', event.buf) then
             local highlight_augroup = vim.api.nvim_create_augroup('kickstart-lsp-highlight', { clear = false })
             vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
@@ -589,20 +601,94 @@ require('lazy').setup({
       --  So, we create new capabilities with blink.cmp, and then broadcast that to the servers.
       local capabilities = require('blink.cmp').get_lsp_capabilities()
 
+      local vue_language_server_path = vim.fn.exepath 'vue-language-server'
+      local tsserver_filetypes = { 'typescript', 'javascript', 'javascriptreact', 'typescriptreact', 'vue' }
+
+      local vtsls_config = {
+        filetypes = { 'vue' },
+        settings = {
+          vtsls = {
+            tsserver = {
+              globalPlugins = {
+                {
+                  name = '@vue/typescript-plugin',
+                  location = vim.fn.stdpath 'data' .. '/mason/packages/vue-language-server/node_modules/@vue/language-server',
+                  languages = { 'vue' },
+                  configNamespace = 'typescript',
+                },
+              },
+            },
+          },
+          typescript = {
+            inlayHints = {
+              parameterTypes = { enabled = true },
+              variableTypes = { enabled = true },
+              functionLikeReturnTypes = { enabled = true },
+            },
+          },
+        },
+        capabilities = {},
+      }
+
+      local vue_ls_config = {
+        filetypes = { 'vue' },
+        init_options = {
+          vue = { hybridMode = false },
+          typescript = { tsdk = vim.fn.getcwd() .. '/node_modules/typescript/lib' },
+        },
+        settings = {
+          vue = {
+            inlayHints = {
+              destructuredProps = { enabled = true },
+              inlineHandlerLoading = { enabled = true },
+              missingProps = { enabled = true },
+              optionsWrapper = { enabled = true },
+              vBindShorthand = { enabled = true },
+            },
+          },
+        },
+      }
       -- Enable the following language servers
       --  Feel free to add/remove any LSPs that you want here. They will automatically be installed.
       --  See `:help lsp-config` for information about keys and how to configure
       local servers = {
-        -- clangd = {},
-        -- gopls = {},
-        -- pyright = {},
+        clangd = {
+          cmd = {
+            'clangd',
+            '--background-index',
+            '--clang-tidy',
+            '--header-insertion=iwyu',
+            '--completion-style=detailed',
+            '--function-arg-placeholders',
+          },
+          filetypes = { 'c', 'cpp', 'objc', 'objcpp' },
+        },
+        gopls = {},
+        pyright = {
+          settings = {
+            python = {
+              pythonPath = (function()
+                -- use .venv if it exists in cwd, otherwise fall back to system python
+                local venv = vim.fn.getcwd() .. '/.venv/bin/python'
+                if vim.fn.executable(venv) == 1 then return venv end
+                return vim.fn.exepath 'python3' or vim.fn.exepath 'python' or 'python'
+              end)(),
+            },
+          },
+        },
         -- rust_analyzer = {},
         --
         -- Some languages (like typescript) have entire language plugins that can be useful:
         --    https://github.com/pmizio/typescript-tools.nvim
         --
         -- But for many setups, the LSP (`ts_ls`) will work just fine
-        ts_ls = {},
+        ts_ls = {
+          filetypes = { 'typescript', 'typescriptreact', 'javascript', 'javascriptreact' },
+        },
+        vue_ls = vue_ls_config,
+        vtsls = vtsls_config,
+        html = { filetypes = { 'html' } },
+        cssls = { filetypes = { 'css', 'scss', 'less' } },
         eslint = {},
       }
 
@@ -615,14 +701,23 @@ require('lazy').setup({
       -- You can press `g?` for help in this menu.
       local ensure_installed = vim.tbl_keys(servers or {})
       vim.list_extend(ensure_installed, {
-        'typescript-language-server',
-        'eslint_d',
         'lua-language-server', -- Lua Language server
         'stylua', -- Used to format Lua code
+        'eslint-lsp',
+        'vue-language-server',
+        'vtsls',
+        'typescript-language-server',
+        'gopls',
+        'pyright', -- Python LSP
+        'ruff', -- Python linter/formatter
+        'clangd',
+        'clang-format',
         -- You can add other tools here that you want Mason to install
       })
 
-      require('mason-tool-installer').setup { ensure_installed = ensure_installed }
+      require('mason-tool-installer').setup {
+        ensure_installed = ensure_installed,
+      }
 
       for name, server in pairs(servers) do
         server.capabilities = vim.tbl_deep_extend('force', {}, capabilities, server.capabilities or {})
@@ -813,6 +908,16 @@ require('lazy').setup({
     end,
   },
 
+  {
+    'williamboman/mason.nvim',
+    config = true,
+  },
+  {
+    'williamboman/mason-lspconfig.nvim',
+    dependencies = { 'williamboman/mason.nvim' },
+    config = true,
+  },
+
   -- Highlight todo, notes, etc in comments
   { 'folke/todo-comments.nvim', event = 'VimEnter', dependencies = { 'nvim-lua/plenary.nvim' }, opts = { signs = false } },
 
@@ -852,17 +957,48 @@ require('lazy').setup({
     end,
   },
 
-  { -- Highlight, edit, and navigate code
+  {
     'nvim-treesitter/nvim-treesitter',
+    build = ':TSUpdate',
     config = function()
-      local filetypes = { 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' }
+      local filetypes = {
+        'vue',
+        'bash',
+        'c',
+        'cpp',
+        'cmake',
+        'diff',
+        'html',
+        'lua',
+        'luadoc',
+        'markdown',
+        'markdown_inline',
+        'query',
+        'vim',
+        'vimdoc',
+        'javascript',
+        'typescript',
+        'css',
+        'go',
+        'gomod',
+        'gowork',
+        'gotmpl',
+        'python',
+      }
       require('nvim-treesitter').install(filetypes)
       vim.api.nvim_create_autocmd('FileType', {
         pattern = filetypes,
-        callback = function() vim.treesitter.start() end,
+        callback = function(ev)
+          local lang = vim.treesitter.language.get_lang(vim.bo[ev.buf].filetype)
+          if lang and pcall(vim.treesitter.start, ev.buf, lang) then return end
+          vim.treesitter.start()
+        end,
       })
     end,
   },
+
+  { 'nvim-lua/plenary.nvim' },
+  { 'jose-elias-alvarez/null-ls.nvim', opts = {} },
 
   -- The following comments only work if you have downloaded the kickstart repo, not just copy pasted the
   -- init.lua. If you want these files, they are in the repository, so you can just download them and
