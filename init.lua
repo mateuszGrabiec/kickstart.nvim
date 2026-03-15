@@ -660,6 +660,7 @@ require('lazy').setup({
             '--header-insertion=iwyu',
             '--completion-style=detailed',
             '--function-arg-placeholders',
+            '--offset-encoding=utf-16',
           },
           filetypes = { 'c', 'cpp', 'objc', 'objcpp' },
         },
@@ -982,7 +983,7 @@ require('lazy').setup({
         'go',
         'gomod',
         'gowork',
-        'gotmpl',
+        'gotmpl', -- Go
         'python',
       }
       require('nvim-treesitter').install(filetypes)
